@@ -9,6 +9,7 @@ from torch import cuda
 from transformers import MT5ForConditionalGeneration, T5Tokenizer
 import re
 import datetime
+import os
 
 device = 'cuda' if cuda.is_available() else 'cpu'
 
@@ -72,7 +73,7 @@ def train(epoch, tokenizer, model, device, loader, optimizer):
         loss.backward()
         optimizer.step()
 
-def validate(epoch, tokenizer, model, device, loader):
+def validate(tokenizer, model, device, loader):
     model.eval()
     predictions = []
     actuals = []
@@ -83,8 +84,8 @@ def validate(epoch, tokenizer, model, device, loader):
             mask = data['source_mask'].to(device, dtype = torch.long)
 
             generated_ids = model.generate(
-                input_ids = ids,
-                attention_mask = mask,
+                input_ids=ids,
+                attention_mask=mask,
                 max_length=70,
                 num_beams=20,
                 repetition_penalty=2.5,
@@ -95,10 +96,11 @@ def validate(epoch, tokenizer, model, device, loader):
             target = [tokenizer.decode(t, skip_special_tokens=True, clean_up_tokenization_spaces=True)for t in y]
             print('preds', preds)
             print('target', target)
-            if _%100==0:
+            if _ % 100==0:
                 print(f'Completed {_}')
             predictions.extend(preds)
             actuals.extend(target)
+            
     return predictions, actuals
 
 
@@ -110,46 +112,31 @@ def clean_text(text):
 
 def main():
 
-    TRAIN_BATCH_SIZE = 2  # input batch size for training (default: 64)
-    VALID_BATCH_SIZE = 2  # input batch size for testing (default: 1000)
-    TRAIN_EPOCHS = 1  # number of epochs to train (default: 10)
+    TRAIN_BATCH_SIZE = 2
+    VALID_BATCH_SIZE = 2
+    TRAIN_EPOCHS = 1
     VAL_EPOCHS = 1
-    LEARNING_RATE = 1e-4  # learning rate (default: 0.01)
-    SEED = 42  # random seed (default: 42)
+    LEARNING_RATE = 1e-4
+    SEED = 42
     MAX_LEN = 512
     SUMMARY_LEN = 150
 
-    # Set random seeds and deterministic pytorch for reproducibility
-    torch.manual_seed(SEED)  # pytorch random seed
-    np.random.seed(SEED)  # numpy random seed
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
     torch.backends.cudnn.deterministic = True
 
-    # tokenzier for encoding the text
     tokenizer = T5Tokenizer.from_pretrained("google/mt5-base")
 
-    # Importing and Pre-Processing the domain data
-    # Selecting the needed columns only.
-    # Adding the summarzie text in front of the text. This is to format the dataset similar to how T5 model was trained for summarization task.
-    df = pd.read_csv(r"C:\Users\Alexander\PycharmProjects\untitled\ciberleninka5.csv")
+    df = pd.read_csv(r"data.csv")
     df = df[['summary', 'text']]
     df = df.dropna().reset_index(drop=True)
-    df = df.loc[df['text'] != 'text'].reset_index(drop=True)
     df['text'] = df.apply(lambda x: clean_text(x['text']), axis=1)
     df = df.dropna().reset_index(drop=True)
-    df = df[:int(len(df) // 6)]
     print(df.shape)
-    #df = pd.read_csv(r"D:\С\datasets\lenta-ru-news01012014.csv")
-    #df = df[['title', 'text']]
-    #df = df.dropna().reset_index(drop=True)
-    #print(df.shape)
-    #df = df[: int(len(df) // 70)]
-    #df = df[['title', 'text']]
     df.text = 'summarize: ' + df.text
     print(df.head())
-
-    # Creation of Dataset and Dataloader
-    # Defining the train size. So 80% of the data will be used for training and the rest will be used for validation.
-    train_size = 0.95
+    
+    train_size = 0.90
     train_dataset = df.sample(frac=train_size, random_state=SEED)
     val_dataset = df.drop(train_dataset.index).reset_index(drop=True)
     train_dataset = train_dataset.reset_index(drop=True)
@@ -158,11 +145,11 @@ def main():
     print("TRAIN Dataset: {}".format(train_dataset.shape))
     print("TEST Dataset: {}".format(val_dataset.shape))
 
-    # Creating the Training and Validation dataset for further creation of Dataloader
+
     training_set = CustomDataset(train_dataset, tokenizer, MAX_LEN, SUMMARY_LEN)
     val_set = CustomDataset(val_dataset, tokenizer, MAX_LEN, SUMMARY_LEN)
 
-    # Defining the parameters for creation of dataloaders
+
     train_params = {
         'batch_size': TRAIN_BATCH_SIZE,
         'shuffle': True,
@@ -175,43 +162,32 @@ def main():
         'num_workers': 0
     }
 
-    # Creation of Dataloaders for testing and validation. This will be used down for training and validation stage for the model.
     training_loader = DataLoader(training_set, **train_params)
     val_loader = DataLoader(val_set, **val_params)
 
-    # Defining the model. We are using t5-base model and added a Language model layer on top for generation of Summary.
-    # Further this model is sent to device (GPU/TPU) for using the hardware.
     model = MT5ForConditionalGeneration.from_pretrained("google/mt5-base")
     model = model.to(device)
 
-    # Defining the optimizer that will be used to tune the weights of the network in the training session.
     optimizer = torch.optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
 
-    # Log metrics with wandb
-    # Training loop
-    print('Initiating Fine-Tuning for the model on our dataset')
     t1 = datetime.datetime.now()
     print(t1)
     for epoch in range(TRAIN_EPOCHS):
         train(epoch, tokenizer, model, device, training_loader, optimizer)
 
-    # Validation loop and saving the resulting file with predictions and acutals in a dataframe.
-    # Saving the dataframe as predictions.csv
     t2 = datetime.datetime.now()
     print(t2)
     print(str(t2 - t1))
-    print('Now generating summaries on our fine tuned model for the validation dataset and saving it in a dataframe')
     for epoch in range(VAL_EPOCHS):
-        predictions, actuals = validate(epoch, tokenizer, model, device, val_loader)
+        predictions, actuals = validate(tokenizer, model, device, val_loader)
         final_df = pd.DataFrame({'Generated Text': predictions, 'Actual Text': actuals})
         final_df.to_csv('predictions.csv')
-        print('Output Files generated for review')
-
-    import os
-    saved_model_dir = "./saved_models_ciberleninka_summary/"
+   
+    saved_model_dir = "./saved_model_summary/"
 
     if not os.path.exists(saved_model_dir):
         os.makedirs(saved_model_dir)
+        
     model.save_pretrained(saved_model_dir)
     tokenizer.save_pretrained(saved_model_dir)
 
